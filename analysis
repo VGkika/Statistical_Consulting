@@ -1,0 +1,833 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+set.seed(2023)
+```
+
+## Loading the data and libraries
+
+```{r message=FALSE, warning=FALSE}
+library(ggplot2)
+library(readr)
+library(ptmixed)
+library(plotrix)
+library(reshape2)
+library(data.table)
+library(tidyr)
+library(mice)
+library(nlme)
+library(lme4)
+library(mlmhelpr)
+library(reshape2)
+library(data.table)
+library(dplyr)
+library(broom.mixed)
+dataset <- read.csv("data/behav_mcc_merge_all.csv", sep = ";")
+```
+
+## Arranging the data
+
+```{r}
+dataset$sex = as.factor(dataset$sex)
+dataset$mcc_zygosity = as.factor(dataset$mcc_zygosity)
+ind = which(dataset$mcc_w05_seq_totalsum_attentionhyper_pp == 999)
+dataset[ind, "mcc_w05_seq_totalsum_attentionhyper_pp"] = NA
+
+ind = which(dataset$ses == 3)
+dataset[ind, "ses"] = 2
+ind = which(dataset$ses == 5)
+dataset[ind, "ses"] = 3
+ind = which(dataset$mcc_w05_seq_anxiety_sum_pp == 999)
+dataset[ind, "mcc_w05_seq_anxiety_sum_pp"] = NA
+ses.f = as.factor(dataset$ses)
+df_all = dataset
+# merge amygdala by taking the mean
+df_all$Mean_Amygdala = (df_all$Left.Amygdala + df_all$Right.Amygdala)/2
+```
+
+## Data Exploration
+
+### Demographics
+
+```{r}
+# df with unique ids for their first visit
+
+df_all$first_session = rep(NA, nrow(df_all))
+df_all$first_session[1] = 1
+
+for(i in (2:nrow(df_all))){
+  if(df_all$sub_id_new[i] == df_all$sub_id_new[i-1]){
+    df_all$first_session[i] = 0
+  } else {
+    df_all$first_session[i] = 1
+  }
+}
+
+uniqueIDs_df = df_all[df_all$first_session == 1,]
+```
+
+```{r}
+## number of subjects
+cat("Number of subjects:", nrow(uniqueIDs_df), "\n")
+
+## zygosity 
+table(uniqueIDs_df$mcc_zygosity)
+
+## sex (males:1, females:0)
+table(uniqueIDs_df$sex)
+cat("\n")
+
+## age
+table(round(df_all$age))
+cat("\n")
+
+cat("Range of age:", range(df_all$age), "\n\n")
+
+## sessions
+cat("Number of subjects attending the 1st visit:", sum(df_all$ses==1), "\n")
+cat("Number of subjects attending the 3rd visit:", sum(df_all$ses==2), "\n")
+cat("Number of subjects attending the 5th visit:", sum(df_all$ses==3), "\n\n")
+```
+
+```{r}
+cat("Drop out rate:", round((1 - 228/415)*100), "%")
+```
+
+### Complete cases
+
+```{r}
+f = function(x){
+  k=0
+  for (i in 1:length(x)){
+    if (x[i] %in% c(1,2,3)){
+      k = k + 1
+    }
+  }
+  return(k)
+}
+complete_cases = sum(as.data.frame(tapply(dataset$ses, dataset$sub_id_new, f))==3)
+cat("The number of complete cases is:", complete_cases, "\n")
+
+
+# pairs of twins
+number_ids = as.numeric(unique(substr(df_all$sub_id_new, 8, 13)))
+
+n = 0
+for (i in 1:(length(number_ids)-1)){
+  if (number_ids[i + 1] == number_ids[i] + 1){
+    n = n + 1
+  }
+}
+cat("Number of pairs of twins:", n)
+```
+
+### Demographics at baseline (ses=1)
+
+```{r}
+df_baseline = df_all[df_all$ses==1,]
+df_baseline$age_rounded = round(df_baseline$age)
+
+#gender
+sum(df_baseline$sex == 1) #boys
+sum(df_baseline$sex == 0) #girls
+```
+
+```{r}
+#age
+sum(df_baseline$age_rounded == 7)
+sum(df_baseline$age_rounded == 8)
+sum(df_baseline$age_rounded == 9)
+sum(df_baseline$age_rounded == 10)
+```
+
+```{r}
+#zygosity
+sum(df_baseline$mcc_zygosity == 'DZ')
+sum(df_baseline$mcc_zygosity == 'MZ')
+```
+
+```{r}
+#gender inequality home index
+sum(df_baseline$gender_inequality_home_index == -3 | df_baseline$gender_inequality_home_index == -2, na.rm = T)
+sum(df_baseline$gender_inequality_home_index == -1 | df_baseline$gender_inequality_home_index == 0 | df_baseline$gender_inequality_home_index == 1, na.rm = T)
+sum(df_baseline$gender_inequality_home_index == 2 | df_baseline$gender_inequality_home_index == 3, na.rm = T)
+```
+
+```{r}
+#adhd
+sum(df_baseline$mcc_w05_seq_totalsum_attentionhyper_pp >= 0 & df_baseline$mcc_w05_seq_totalsum_attentionhyper_pp <= 24, na.rm = T)
+sum(df_baseline$mcc_w05_seq_totalsum_attentionhyper_pp >= 25 & df_baseline$mcc_w05_seq_totalsum_attentionhyper_pp <= 48, na.rm = T)
+sum(df_baseline$mcc_w05_seq_totalsum_attentionhyper_pp >= 49 & df_baseline$mcc_w05_seq_totalsum_attentionhyper_pp <= 72, na.rm = T)
+```
+
+```{r}
+#anxiety
+sum(df_baseline$mcc_w05_seq_anxiety_sum_pp >= 0 & df_baseline$mcc_w05_seq_anxiety_sum_pp <= 12, na.rm = T)
+sum(df_baseline$mcc_w05_seq_anxiety_sum_pp >= 13 & df_baseline$mcc_w05_seq_anxiety_sum_pp <= 24, na.rm = T)
+```
+
+### Boys and girls attendances at each session
+
+```{r}
+dataset_beginning = dataset[dataset$ses == 1,]
+ggplot(data = dataset, aes(x=sex, fill=sex)) + geom_bar( width=0.5) +
+  scale_fill_hue(c = 40) +
+  scale_fill_discrete(name = "sex", labels = c("boys", "girls")) + 
+  facet_grid(rows = vars(ses)) +
+  theme(axis.text.x = element_blank())+
+  ggtitle("count of participants of both sexes per session")
+```
+
+### Age partition at baseline
+
+```{r}
+dataset_beginning$age_rounded = round(dataset_beginning$age)
+
+ggplot(data=dataset_beginning, aes(x=age_rounded, fill=sex)) + geom_histogram(binwidth = 0.5)+
+  facet_grid(rows = vars(sex)) +
+  #scale_fill_discrete(name = "sex", labels = c("boys", "girls")) +
+  scale_fill_manual(name = "sex", values=c("darkgreen", "orange"),
+                    labels = c("boys", "girls"))+
+  xlab("baseline age")+
+  
+  ggtitle("age partition at baseline between boys and girls")
+```
+
+### CI plot
+
+```{r}
+m=s=numeric (3) 
+df_all$session = as.factor(df_all$ses)
+for ( i in 0:3){
+  m[i+1]=mean(df_all[df_all$session==i ,]$Mean_Amygdala)
+  s[i+1]=sd(df_all[df_all$session==i ,]$Mean_Amygdala)
+}
+plotCI(x=0:3, y=m, ui = m+s, li=m-s, col="blue",
+       ylab = "Mean Amygdala", main = "CIplot: Mean and standard deviation over time")
+```
+
+### ADHD against inequality index
+
+```{r}
+dose_lab = c("girls", "boys")
+names(dose_lab) = c(0,1)
+ggplot(data=dataset_beginning,
+       aes(x=gender_inequality_home_index,
+           y = mcc_w05_seq_totalsum_attentionhyper_pp,
+           col = sex))+
+  geom_point(size = 1, alpha = 0.5)+
+  geom_jitter(width = 0.1)+
+  facet_grid(rows = vars(sex), labeller = labeller(sex=dose_lab))+
+  scale_color_manual(name = "sex", values=c("orange", "darkgreen"),
+                    labels = c("boys", "girls"))+
+  labs(x = "parents inequality index",
+       y = "ADHD levels")+
+  ggtitle("ADHD levels depending on parents inequality levels")+
+  theme(legend.position = "none")+
+  scale_x_continuous(breaks = seq(-3, 3, 1))
+```
+
+### Anxiety against inequality index
+
+```{r}
+dose_lab = c("girls", "boys")
+names(dose_lab) = c(0,1)
+ggplot(data=dataset_beginning,
+       aes(x=gender_inequality_home_index,
+           y = mcc_w05_seq_anxiety_sum_pp,
+           col = sex))+
+  geom_point(size = 2, alpha = 0.5)+
+  geom_jitter(width = 0.1)+
+  facet_grid(rows = vars(sex), 
+             labeller = labeller(sex=dose_lab))+
+  scale_color_manual(name = "sex", values=c("orange", "darkgreen"),
+                    labels = c("boys", "girls"))+
+  labs(x = "parents inequality index",
+       y = "Anxiety levels")+
+  ggtitle("Anxiety levels depending on parents inequality levels")+
+  theme(legend.position = "none")+
+  scale_x_continuous(breaks = seq(-3, 3, 1))
+```
+
+### Average evolution of the mean Amygdala size among boys and girls over time
+
+```{r}
+# merge amygdala by taking the mean
+df_all$Mean_Amygdala = (df_all$Left.Amygdala + df_all$Right.Amygdala)/2
+
+men = which(df_all$sex == 1)
+df_men = df_all[men,] 
+df_women = df_all[-men,] 
+
+df_all$age_rounded = round(df_all$age)
+df_men$age_rounded = round(df_men$age)
+df_women$age_rounded = round(df_women$age)
+
+men_mean = tapply(df_men$Mean_Amygdala, df_men$age_rounded, mean)
+women_mean = tapply(df_women$Mean_Amygdala, df_women$age_rounded, mean)
+```
+
+```{r}
+par(bty = 'l')
+plot(x = sort(unique(df_men$age_rounded)), y = men_mean, ylim = c(1450, 1950),
+     ylab = "Mean amygdala size (in mm3)", xlab = "Age",
+     col = "darkgreen", type = "b", lwd = 2, lty = 2, 
+     main = "Evolution of mean size of amygdala among boys and girls")
+
+lines(x = sort(unique(df_women$age_rounded)), y = women_mean,
+     col = "orange", type = "b", lwd = 2, lty = 2)
+
+text(12.5, 1850, "boys", col = 'darkgreen')
+text(12.5, 1620, "girls", col = 'orange')
+```
+
+### Individual evolutions of the mean amagydala size over time
+
+```{r, message=FALSE, warning=FALSE}
+visits_per_factor = tapply(df_all$ses, df_all$sex, table)
+TABLE = rbind(visits_per_factor$'0', visits_per_factor$'1')
+df_sample = df_all[1:29,]
+ggplot(df_sample, aes(x=age, y=Mean_Amygdala, col = factor(sub_id_new))) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~ sub_id_new) +
+  labs(x = "Age", y = "Mean Amygdala, mm3", col = "Child id")+
+  ggtitle("Amygdala size evolution per child over time")
+```
+
+### Missing values
+
+```{r}
+visits_per_factor = tapply(dataset$ses, dataset$sex, table)
+TABLE = rbind(visits_per_factor$'0', visits_per_factor$'1')
+TABLE
+```
+
+```{r}
+p_missing = unlist(lapply(uniqueIDs_df, function(x) sum(is.na(x))))/nrow(uniqueIDs_df)
+sort(p_missing[p_missing > 0], decreasing = TRUE)
+```
+
+
+```{r}
+cat("Missing values for Anxiety:", sum(is.na(uniqueIDs_df$mcc_w05_seq_anxiety_sum_pp)), "\n"); cat("Percentage of missing values for Anxiety:", round((sum(is.na(uniqueIDs_df$mcc_w05_seq_anxiety_sum_pp))/nrow(uniqueIDs_df))*100, 2), "%", "\n\n")
+
+cat("Missing values for ADHD:", sum(is.na(uniqueIDs_df$mcc_w05_seq_totalsum_attentionhyper_pp)), "\n"); cat("Percentage of missing values for ADHD:", round((sum(is.na(uniqueIDs_df$mcc_w05_seq_anxiety_sum_pp))/nrow(uniqueIDs_df))*100, 2), "%", "\n\n")
+
+cat("Missing values for Sports:", sum(is.na(uniqueIDs_df$sport_type) | uniqueIDs_df$sport_type=='missing'), "\n"); cat("Percentage of missing values for Sports:", round((sum(is.na(uniqueIDs_df$sport_type) | uniqueIDs_df$sport_type=='missing')/nrow(uniqueIDs_df))*100, 2), "%", "\n\n")
+
+cat("Missing values of the gender inequality home index:", sum(is.na(uniqueIDs_df$gender_inequality_home_index)), "\n");
+cat("Percentage of missing values of the gender inequality home index:", round(sum(is.na(uniqueIDs_df$gender_inequality_home_index))/nrow(uniqueIDs_df), 3)*100, "% \n\n")
+
+# sex
+cat("Number of missing values of sex:", sum(is.na(uniqueIDs_df$sex)), "\n\n");
+
+# zygosity
+cat("Number of missing values of zygosity:", sum(is.na(uniqueIDs_df$zygosity)), "\n");
+```
+
+### Converting from long to wide format
+
+```{r}
+# long to wide format
+df_wide = dcast(as.data.table(df_all), sub_id_new + sex + mcc_zygosity + mcc_w05_seq_totalsum_attentionhyper_pp + mcc_w05_seq_anxiety_sum_pp + gender_inequality_home_index ~ ses.f, value.var = c('age', 'Mean_Amygdala'))
+```
+
+```{r}
+df_nona = na.omit(df_wide)
+timeDiff1 = round((mean(df_nona$age_2 - df_nona$age_1)), 6)
+timeDiff2 = round((mean(df_nona$age_3 - df_nona$age_2)), 6)
+paste0("time difference between 2nd and 1st sessions:",timeDiff1)
+paste0("time difference between 3rd and 2nd sessions:",timeDiff2)
+```
+
+### Simplify and rescale the age
+
+```{r}
+df_age = df_wide
+for(i in 1:nrow(df_age)){
+  if(is.na(df_age[i, "age_1"])){
+    if(is.na(df_age[i, "age_2"])){
+      df_age[i, "age_1"] = df_age[i, "age_3"] - (timeDiff1+timeDiff2)
+    }
+    else{
+      df_age[i, "age_1"] = df_age[i, "age_2"] - timeDiff1
+    }
+  }
+  if(is.na(df_age[i, "age_2"])){
+    if(is.na(df_age[i, "age_1"])){
+      df_age[i, "age_2"] = df_age[i, "age_3"] - timeDiff2
+    }
+    else{
+      df_age[i, "age_2"] = df_age[i, "age_1"] + timeDiff1
+    }
+  }
+  if(is.na(df_age[i, "age_3"])){
+    df_age[i, "age_3"] = df_age[i, "age_1"] + timeDiff1 + timeDiff2
+  }
+}
+
+for(i in 1:nrow(df_age)){
+  df_age[i, 9] = round(df_age[i, 9])-7
+  df_age[i, 8] = round(df_age[i, 8])-7
+  df_age[i, 7] = round(df_age[i, 7])-7
+}
+unique(df_age$age_1)
+```
+
+## Multiple Imputation
+
+```{r}
+initial = mice(data = df_age,
+           m = 1,
+           maxit = 10,
+           printFlag = F,
+           method = c(rep("", 3), 
+                      rep("pmm", 3),
+                      rep("", 3),
+                      rep("norm", 3)),
+           seed = 2023)
+
+predmat = initial$predictorMatrix
+predmat[,c(1,8,9)] = 0
+```
+
+### 10 multiple imputation
+
+```{r}
+imputation = mice(data = df_age,
+           m = 10,
+           maxit = 10,
+           printFlag = F,
+           predictorMatrix = predmat,
+           method = c(rep("", 3), 
+                      rep("pmm", 3),
+                      rep("", 3),
+                      rep("norm", 3)),
+           seed = 2023)
+```
+
+### Imputation Diagnostics
+
+```{r}
+plot(imputation)
+```
+
+```{r}
+densityplot(imputation, layout = c(3, 1))
+```
+
+## Convert wide mice object to long mice object
+
+```{r}
+df_stacked = complete(data = imputation, 
+                      action = "long", include = T)
+df_stacked = df_stacked[,-2]
+df_long2 = gather(df_stacked, condition, measurement, age_1:Mean_Amygdala_3, factor_key=TRUE)
+
+session = rep(NA, nrow(df_long2))
+var = rep(NA, nrow(df_long2))
+df_long2[, "condition"] = as.character(df_long2[, "condition"])
+for(i in 1:nrow(df_long2)){
+  session[i] = substr(df_long2[i, "condition"], 
+                      start = nchar(df_long2[i, "condition"]), 
+                      stop = nchar(df_long2[i, "condition"]))
+  var[i] = gsub("1","", df_long2[i, "condition"])
+  var[i] = gsub("2","", var[i])
+  var[i] = gsub("3","", var[i])
+  var[i] = gsub("_","", var[i])
+}
+
+df_long2$session = session
+df_long2$var = var
+df_long2_mids = as.mids(df_long2)
+```
+
+```{r}
+df_new = df_long2[,-c(8,9)] #remove condition and measurement
+df_new$Age = rep(NA, nrow(df_new))
+df_new$Amygdala = rep(NA, nrow(df_new))
+
+for (i in 1:nrow(df_long2)){
+  #print(i)
+  imputed_dataset = df_long2$.imp[i]
+  id = df_long2$sub_id_new[i]
+  ses = df_long2$session[i]
+  variable = df_long2$var[i]
+  measur = df_long2$measurement[i]
+  if (variable == 'age'){
+    df_new[df_new$.imp == imputed_dataset & df_new$sub_id_new == id & df_new$session == ses, 'Age'] = measur
+  } else if (variable == 'MeanAmygdala'){
+    df_new[df_new$.imp == imputed_dataset & df_new$sub_id_new == id & df_new$session == ses, 'Amygdala'] = measur
+  }
+}
+```
+
+```{r}
+df_new_2 = df_new %>% distinct(.imp, session, sub_id_new, Age, Amygdala, .keep_all = TRUE)
+df_new_2$var = NULL
+df = as.mids(df_new_2)
+```
+
+## Mixed models - Research Question 1
+
+### Normality assumptions:
+
+```{r}
+#qqplot of amygdala session 1 (baseline) excluding the missing values
+qqnorm(df_age$Mean_Amygdala_1, col = "blue",
+       main = "QQplot: Amygdala Size session 1")
+qqline(df_age$Mean_Amygdala_1, lwd=1)
+```
+
+### Model comparisons
+
+```{r}
+first_imp = complete(df, 1)
+second_imp = complete(df, 2)
+
+RI = with(first_imp, lme(Amygdala ~ session + sex + 
+               mcc_zygosity +
+               mcc_w05_seq_totalsum_attentionhyper_pp +
+               mcc_w05_seq_anxiety_sum_pp +
+               gender_inequality_home_index +
+               Age +
+               Age*gender_inequality_home_index + 
+               Age*sex + 
+                 gender_inequality_home_index*sex + sex*mcc_w05_seq_totalsum_attentionhyper_pp + sex*mcc_w05_seq_anxiety_sum_pp + abs(gender_inequality_home_index),
+               random = ~ 1|sub_id_new, #random intercept
+               weights = varIdent ( ~ 1),
+               correlation = corAR1(form = ~1 |sub_id_new )))
+RSRI = with(first_imp, lme(Amygdala ~ session + sex + 
+               mcc_zygosity +
+               mcc_w05_seq_totalsum_attentionhyper_pp +
+               mcc_w05_seq_anxiety_sum_pp +
+               gender_inequality_home_index +
+               Age +
+               Age*gender_inequality_home_index + 
+               Age*sex + 
+                 gender_inequality_home_index*sex+ sex*mcc_w05_seq_totalsum_attentionhyper_pp + sex*mcc_w05_seq_anxiety_sum_pp + abs(gender_inequality_home_index),
+               random = ~ session|sub_id_new, #random slope
+               weights = varIdent ( ~ 1),
+               correlation = corAR1(form = ~1 |sub_id_new )))
+anova(RI, RSRI)
+```
+
+### Final Mixed Model
+
+```{r}
+full = with(df, lme(Amygdala ~ session + sex + 
+                            mcc_zygosity +
+                            mcc_w05_seq_totalsum_attentionhyper_pp +
+                            mcc_w05_seq_anxiety_sum_pp +
+                            gender_inequality_home_index +
+                            Age +
+                            gender_inequality_home_index*sex+  abs(gender_inequality_home_index) + Age*sex + Age*gender_inequality_home_index,
+                          random = ~ 1|sub_id_new,
+                          weights = varIdent ( ~ 1),
+                          correlation = corCAR1(form = ~1 |sub_id_new )))
+summary(pool(full))
+```
+
+### ICC
+
+```{r}
+models <- lapply(1:10, function(i) {
+  lme_model <- lme(Amygdala ~ session + sex + 
+               mcc_zygosity +
+               mcc_w05_seq_totalsum_attentionhyper_pp +
+               mcc_w05_seq_anxiety_sum_pp +
+               gender_inequality_home_index+ abs(gender_inequality_home_index)+
+               Age +
+                 gender_inequality_home_index*sex + Age*sex + Age*gender_inequality_home_index,
+               random = ~ 1|sub_id_new, 
+               #~ session|sub_id_new for random slope
+               weights = varIdent ( ~ 1),
+               correlation = corCAR1(form = ~1 |sub_id_new ),
+            data = complete(df, i))
+  return(lme_model)
+})
+var_components = lapply(models, VarCorr) #from nlme
+var_components[[1]][1,1] # access variance of random intercept
+# (Intercept) Variance: Between-group variance.
+# Residual Variance: Within-group variance.
+between_group_variance = list()
+total_variance = list()
+
+for (i in 1:10){
+  between_group_variance[i] = as.numeric(var_components[[i]][1,1])
+  total_variance[i] = sum(as.numeric(unlist(var_components[[i]][,1])))
+}
+total_variance= total_variance|> unlist()
+between_group_variance=between_group_variance|> unlist()
+icc_values = between_group_variance /total_variance 
+avg_icc = mean(unlist(icc_values))
+avg_icc
+```
+
+### Mixed Model Diagnostics
+
+#### Standardize QQplots per imputed dataset
+
+```{r}
+re = list()
+
+for (i in 1:10) {
+  # Extract random effects
+  re[[i]] <- full$analyses[[i]]$residuals[, 1:2]
+}
+
+par(mfrow = c(2, 5))
+
+for (i in 1:10) {
+  # Standardize residuals
+  standardized_residuals <- scale(re[[i]][, 1])
+  
+  # Q-Q plot with standardized residuals
+  qqnorm(standardized_residuals, col='blue', 
+         main = paste0("Standardized Q-Q Plot of Imputed Dataset", i), cex.main = 1)
+  qqline(standardized_residuals, col='black')
+}
+```
+
+#### Residual Plot for the 1st imputed dataset
+
+```{r}
+model = lme(Amygdala ~ session + sex + 
+               mcc_zygosity +
+               mcc_w05_seq_totalsum_attentionhyper_pp +
+               mcc_w05_seq_anxiety_sum_pp +
+               gender_inequality_home_index +
+               Age +
+                 gender_inequality_home_index*sex+ sex*mcc_w05_seq_totalsum_attentionhyper_pp + sex*mcc_w05_seq_anxiety_sum_pp + abs(gender_inequality_home_index) + Age*sex,
+               random = ~ session|sub_id_new, #random slope
+               weights = varIdent ( ~ 1),
+               correlation = corCAR1(form = ~1 |sub_id_new ),
+            data = first_imp)
+
+plot(model , resid (. , type = "p") ~ fitted (.) , type = c("p", "smooth"), lwd = 3)
+
+```
+
+#### Residual Plot per imputed dataset
+
+```{r}
+residual_plots = list()
+
+for (i in 1:10) {
+  # Fit the model for the ith imputed dataset
+  model = lme(Amygdala ~ session + sex + 
+                mcc_zygosity +
+                mcc_w05_seq_totalsum_attentionhyper_pp +
+                mcc_w05_seq_anxiety_sum_pp +
+                gender_inequality_home_index +
+                Age +
+                gender_inequality_home_index*sex + 
+                sex*mcc_w05_seq_totalsum_attentionhyper_pp + 
+                sex*mcc_w05_seq_anxiety_sum_pp + 
+                abs(gender_inequality_home_index) + Age*sex,
+              random = ~ session | sub_id_new, # random slope
+              weights = varIdent(~1),
+              correlation = corCAR1(form = ~1 | sub_id_new),
+              data = complete(df, i))
+
+  # residuals for the ith imputed dataset
+  residuals_i = resid(model, type = "p")
+
+  residual_plots[[i]] = residuals_i
+}
+
+par(mfrow = c(2, 5))
+
+for (i in 1:10) {
+  plot(residual_plots[[i]] ~ fitted(model), 
+       type = "p", 
+       main = paste0("Residuals ", i),
+       col='blue', pch = 1,
+       lwd = 3)
+}
+```
+
+
+## GLMs - Research Question 2
+
+### Normality Check
+
+```{r}
+par(mfrow = c(1,2))
+
+# ADHD (max: 72)
+summary(df_all$mcc_w05_seq_totalsum_attentionhyper_pp)
+table(df_all$mcc_w05_seq_totalsum_attentionhyper_pp)
+hist(df_all$mcc_w05_seq_totalsum_attentionhyper_pp, main = 'ADHD', 
+     xlab = '', ylim = c(0, 0.05), col = 'steelblue3', prob = T)
+qqnorm(df_all$mcc_w05_seq_totalsum_attentionhyper_pp)
+qqline(df_all$mcc_w05_seq_totalsum_attentionhyper_pp)
+
+# anxiety (max: 24)
+summary(df_all$mcc_w05_seq_anxiety_sum_pp)
+table(df_all$mcc_w05_seq_anxiety_sum_pp)
+hist(df_all$mcc_w05_seq_anxiety_sum_pp, main = 'Anxiety', 
+     xlab = '', xlim = c(0, 20), col = 'forestgreen', prob = T)
+qqnorm(df_all$mcc_w05_seq_anxiety_sum_pp)
+qqline(df_all$mcc_w05_seq_anxiety_sum_pp)
+```
+
+### Response variables (ADHD and anxiety)
+
+Right skewed
+
+```{r warning=FALSE}
+library(MASS)
+
+# ADHD (max: 72)
+y = df_age$mcc_w05_seq_totalsum_attentionhyper_pp
+hist(y, main = 'Distribution of ADHD', xlab = 'ADHD', col = 'steelblue2', prob = T, ylim = c(0, 0.06))
+curve(dexp(x, rate = 1/mean(y, na.rm=T)), from = 0, add = T, col = 'red', lwd = 2, lty =  2)
+
+y = y[!is.na(y)] + 0.01
+fit = fitdistr(y, "gamma")
+curve(dgamma(x, shape = fit$estimate[1], rate = fit$estimate[2]), from = 0, add = T, col = 'black', lwd = 2, lty = 2)
+
+text(x = 12.293567, y = 0.05496992, 'Exponential Distribution', col='red')
+text(x = 21.008381, y = 0.03818372, 'Gamma Distribution', col='black')
+```
+
+```{r warning=FALSE}
+# anxiety (max: 24)
+y = df_age$mcc_w05_seq_anxiety_sum_pp
+hist(y, main = 'Distribution of Anxiety', xlab = 'Anxiety', col = 'forestgreen', prob = T, breaks = 20)
+curve(dexp(x, rate = 1/mean(y, na.rm=T)), from = 0, add = T, col = 'red', lwd = 2, lty =  2)
+
+y = y[!is.na(y)] + 0.01
+fit = fitdistr(y, "gamma")
+curve(dgamma(x, shape = fit$estimate[1], rate = fit$estimate[2]), from = 0, add = T, col = 'black', lwd = 2, lty =  2)
+
+text(x = 6.793567, y = 0.1046992, 'Exponential Distribution', col='red')
+text(x = 3.28381, y = 0.4018372, 'Gamma Distribution', col='black')
+```
+
+#### ADHD
+
+##### Model comparisons
+
+```{r}
+# check if anxiety is significant for the model
+
+model0 = with(imputation, 
+              glm((mcc_w05_seq_totalsum_attentionhyper_pp + 0.01) ~ mcc_w05_seq_anxiety_sum_pp + sex + mcc_zygosity + gender_inequality_home_index + age_1, 
+                  family = Gamma(link = "log")))
+
+model1 = with(imputation, 
+              glm((mcc_w05_seq_totalsum_attentionhyper_pp + 0.01) ~ sex + mcc_zygosity + gender_inequality_home_index + age_1, 
+                  family = Gamma(link = "log")))
+
+stat = D3(fit1 = model0, fit0 = model1)
+stat
+```
+
+p-value \< 0.05, so anxiety is statistical significant and will be included in the model.
+
+```{r}
+# check if gender inequality home index is significant for the model
+
+model0 = with(imputation, 
+              glm((mcc_w05_seq_totalsum_attentionhyper_pp + 0.01) ~ mcc_w05_seq_anxiety_sum_pp + sex + mcc_zygosity + gender_inequality_home_index + age_1, 
+                  family = Gamma(link = "log")))
+
+model1 = with(imputation, 
+              glm((mcc_w05_seq_totalsum_attentionhyper_pp + 0.01) ~ mcc_w05_seq_anxiety_sum_pp + sex + mcc_zygosity + age_1, 
+                  family = Gamma(link = "log")))
+
+stat = D3(fit1 = model0, fit0 = model1)
+stat
+```
+
+p-value $\approx$ 0.67 \> 0.05, so the gender inequality home index is insignificant.
+
+Also checked for interactions but none of them was significant.
+
+```{r}
+final_model_ADHD = with(imputation, 
+                        glm((mcc_w05_seq_totalsum_attentionhyper_pp + 0.01) ~ mcc_w05_seq_anxiety_sum_pp + 
+                              sex + 
+                              age_1 +
+                              mcc_zygosity + 
+                              gender_inequality_home_index + 
+                              abs(gender_inequality_home_index) +
+                              gender_inequality_home_index*sex,
+                            family = Gamma(link = "log")))
+
+summary(pool(final_model_ADHD))
+```
+
+```{r}
+out=data.frame('term' = summary(pool(final_model_ADHD))$term, 
+           'estimate_original_scale' = round(exp(summary(pool(final_model_ADHD))$estimate), 3), 
+           'estimate_log_scale' = round(summary(pool(final_model_ADHD))$estimate, 3), 
+           'std_error' = round(summary(pool(final_model_ADHD))$std.error, 3),
+           'p.value' = round(summary(pool(final_model_ADHD))$p.value, 3))
+out
+```
+
+#### Anxiety
+
+##### Model comparisons
+
+```{r}
+# check if ADHD is significant for the model
+
+model0 = with(imputation, 
+              glm((mcc_w05_seq_anxiety_sum_pp + 0.01) ~ mcc_w05_seq_totalsum_attentionhyper_pp + sex + mcc_zygosity + gender_inequality_home_index + age_1, 
+                  family = Gamma(link = "log")))
+
+model1 = with(imputation, 
+              glm((mcc_w05_seq_anxiety_sum_pp + 0.01) ~  sex + mcc_zygosity + gender_inequality_home_index + age_1, 
+                  family = Gamma(link = "log")))
+
+stat = D3(fit1 = model0, fit0 = model1)
+stat
+```
+
+p-value \< 0.05, so ADHD is statistical significant and will be included in the model.
+
+```{r}
+# check if gender inequality home index is significant for the model
+
+model0 = with(imputation, 
+              glm((mcc_w05_seq_anxiety_sum_pp + 0.01) ~ mcc_w05_seq_totalsum_attentionhyper_pp + sex + mcc_zygosity + gender_inequality_home_index + age_1, 
+                  family = Gamma(link = "log")))
+
+model1 = with(imputation, 
+              glm((mcc_w05_seq_anxiety_sum_pp + 0.01) ~ mcc_w05_seq_totalsum_attentionhyper_pp + sex + mcc_zygosity + age_1, 
+                  family = Gamma(link = "log")))
+
+stat = D3(fit1 = model0, fit0 = model1)
+stat
+```
+
+p-value $\approx$ 0.39 \> 0.05, so the gender inequality home index is insignificant.
+
+Also checked for interactions but none of them was significant.
+
+```{r}
+final_model_anxiety = with(imputation, 
+                        glm((mcc_w05_seq_anxiety_sum_pp + 0.01) ~ mcc_w05_seq_totalsum_attentionhyper_pp +
+                              sex + 
+                              age_1 +
+                              mcc_zygosity + 
+                              gender_inequality_home_index + 
+                              abs(gender_inequality_home_index) +
+                              gender_inequality_home_index*sex,
+                            family = Gamma(link = "log")))
+summary(pool(final_model_anxiety))
+```
+
+```{r}
+out=data.frame('term' = summary(pool(final_model_anxiety))$term, 
+           'estimate_original_scale' = round(exp(summary(pool(final_model_anxiety))$estimate), 3), 
+           'estimate_log_scale' = round(summary(pool(final_model_anxiety))$estimate, 3),
+           'std_error' = round(summary(pool(final_model_anxiety))$std.error, 3),
+           'p.value' = round(summary(pool(final_model_anxiety))$p.value, 3))
+out
+```
